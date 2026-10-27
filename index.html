@@ -15,6 +15,9 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500&family=Italiana&display=swap"
       rel="stylesheet"
     />
+    <!-- Precarica in anticipo le immagini della prima sequenza, senza cambiare la coreografia. -->
+    <link rel="preload" as="image" href="./images/chef.avif" fetchpriority="low" />
+    <link rel="preload" as="image" href="./images/locale.avif" fetchpriority="low" />
     <style>
       :root {
         --bg: #11110f;
@@ -2093,7 +2096,8 @@
               <img
                 src="./images/chef.avif"
                 alt="Un momento di lavoro in cucina"
-                loading="lazy"
+                loading="eager"
+                decoding="async"
               />
               <figcaption>La cucina</figcaption>
             </figure>
@@ -2101,7 +2105,8 @@
               <img
                 src="./images/locale.avif"
                 alt="La sala del ristorante"
-                loading="lazy"
+                loading="eager"
+                decoding="async"
               />
               <figcaption>La sala</figcaption>
             </figure>
@@ -3211,6 +3216,14 @@
           right = document.querySelector(".hero__photo--right"),
           stage = document.getElementById("heroStage2"),
           chef = document.getElementById("heroChefVisual");
+        // Decodifica anticipata senza modificare movimenti o tempi delle animazioni.
+        [left, right].forEach((frame) => {
+          const img = frame.querySelector("img");
+          if (!img || typeof img.decode !== "function") return;
+          const decodeAhead = () => img.decode().catch(() => {});
+          if (img.complete && img.naturalWidth) decodeAhead();
+          else img.addEventListener("load", decodeAhead, { once: true });
+        });
         const FULL = 800,
           DEBOUNCE = 320,
           clamp = (v, a, b) => Math.min(Math.max(v, a), b),
