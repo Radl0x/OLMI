@@ -16,8 +16,8 @@
       rel="stylesheet"
     />
     <!-- Precarica in anticipo le immagini della prima sequenza, senza cambiare la coreografia. -->
-    <link rel="preload" as="image" href="./images/chef.avif" fetchpriority="low" />
-    <link rel="preload" as="image" href="./images/locale.avif" fetchpriority="low" />
+    <link rel="preload" as="image" href="./images/chef.avif" />
+    <link rel="preload" as="image" href="./images/locale.avif" />
     <style>
       :root {
         --bg: #11110f;
@@ -1310,6 +1310,60 @@
         }
       }
 
+
+
+      /* HERO — rendering stabile Android/iOS. Nessuna modifica alle traiettorie scroll. */
+      @media (max-width: 768px) and (pointer: coarse) {
+        /* 100svh resta stabile mentre il browser mostra/nasconde la barra URL. */
+        html.is-locked .hero { height: 100svh; }
+
+        /* Evita due trasformazioni concorrenti della stessa foto a schermo intero:
+           lo sfondo continua a seguire esattamente il movimento di scroll JS. */
+        .hero__media img {
+          animation: none;
+          filter: none;
+        }
+        .hero__media::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          pointer-events: none;
+          background: rgba(7, 7, 6, .5);
+        }
+
+        /* Il filtro sul bitmap AVIF in movimento può generare compositing nero
+           su alcune GPU mobili. Stesso oscuramento tramite velo separato. */
+        .hero__photo { isolation: isolate; }
+        .hero__photo img {
+          filter: none;
+          backface-visibility: hidden;
+        }
+        .hero__photo::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          z-index: 1;
+          pointer-events: none;
+          background: rgba(0, 0, 0, .27);
+        }
+        .hero__photo figcaption { z-index: 2; }
+        /* Visuale provvisoria dalla stessa foto già usata nella Hero:
+           non compare mai un rettangolo completamente nero durante il decode. */
+        .hero.hero--mobile-raster .hero__photo {
+          background: #1b1915 url("https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=2000&q=85") center / cover no-repeat;
+        }
+        .hero.hero--mobile-raster .hero__photo img { opacity: 0; }
+        .hero.hero--mobile-raster .hero__photo.is-media-ready img { opacity: 1; }
+
+        /* Le quattro lettere mantengono percorso, rotazione, skew e dissolvenza.
+           Si evita solo il blur live, che richiede un ridisegno ogni frame. */
+        .hero__title .letter { will-change: transform, opacity; }
+        .hero__title { animation-name: heroInMobile; }
+      }
+      @keyframes heroInMobile {
+        from { opacity: 0; transform: translateY(28px) scale(1.045); }
+        to   { opacity: 1; transform: none; }
+      }
 
       /* =========================================================
          FOOTER OLMI — EDITORIAL CINEMATICO / COMPONENTE ISOLATO
@@ -3216,14 +3270,106 @@
           right = document.querySelector(".hero__photo--right"),
           stage = document.getElementById("heroStage2"),
           chef = document.getElementById("heroChefVisual");
-        // Decodifica anticipata senza modificare movimenti o tempi delle animazioni.
-        [left, right].forEach((frame) => {
+        /*
+         * HERO: la regia originale dello scroll resta nel render() sotto.
+         * Su mobile le AVIF possono essere molto grandi e perdere il layer GPU
+         * mentre la figura entra con transform. Una copia WebP ridimensionata,
+         * prodotta una sola volta prima di mostrarla, riduce drasticamente
+         * texture/decodifica. Fallback automatico se manca un asset.
+         */
+        const mobileGpuSafe = matchMedia("(max-width: 768px) and (pointer: coarse)").matches;
+        if (mobileGpuSafe) hero.classList.add("hero--mobile-raster");
+        const photoBuffers = [];
+        function imageLoaded(img) {
+          return new Promise(resolve => {
+            if (img.complete) { resolve(img.naturalWidth > 0); return; }
+            const done = ok => {
+              img.removeEventListener("load", success);
+              img.removeEventListener("error", failure);
+              resolve(ok);
+            };
+            const success = () => done(img.naturalWidth > 0);
+            const failure = () => done(false);
+            img.addEventListener("load", success);
+            img.addEventListener("error", failure);
+          });
+        }
+        async function preparePhoto(frame, backups) {
           const img = frame.querySelector("img");
-          if (!img || typeof img.decode !== "function") return;
-          const decodeAhead = () => img.decode().catch(() => {});
-          if (img.complete && img.naturalWidth) decodeAhead();
-          else img.addEventListener("load", decodeAhead, { once: true });
-        });
+          if (!img) return;
+          const candidates = [img.getAttribute("src"), ...backups];
+          let loaded = false;
+          for (let i = 0; i < candidates.length; i++) {
+            if (i > 0) img.src = candidates[i];
+            loaded = await imageLoaded(img);
+            if (loaded) {
+              try { if (img.decode) await img.decode(); }
+              catch (_) { loaded = false; }
+            }
+            if (loaded) break;
+          }
+          if (!loaded) {
+            // Il fallback fotografico CSS resta visibile: niente box nero.
+            console.warn("OLMI Hero: impossibile caricare", candidates.join(" / "));
+            return;
+          }
+          if (!mobileGpuSafe) return;
+          try {
+            const longSide = Math.max(img.naturalWidth, img.naturalHeight);
+            const desired = Math.min(1152, Math.max(760,
+              Math.round(Math.max(frame.clientWidth, frame.clientHeight) * Math.min(devicePixelRatio || 1, 2.5) * 1.35)));
+            const ratio = Math.min(1, desired / longSide);
+            if (ratio < 0.99) {
+              const width = Math.max(1, Math.round(img.naturalWidth * ratio));
+              const height = Math.max(1, Math.round(img.naturalHeight * ratio));
+              // createImageBitmap esegue il ridimensionamento nel decoder dove supportato.
+              let bitmap = null;
+              if (typeof createImageBitmap === "function") {
+                try { bitmap = await createImageBitmap(img, {
+                  resizeWidth: width, resizeHeight: height, resizeQuality: "high"
+                }); } catch (_) { /* Fallback su drawImage */ }
+              }
+              const canvas = document.createElement("canvas");
+              canvas.width = width; canvas.height = height;
+              const ctx = canvas.getContext("2d", { alpha: false });
+              if (ctx) {
+                ctx.drawImage(bitmap || img, 0, 0, width, height);
+                if (bitmap) bitmap.close();
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/webp", .84));
+                canvas.width = canvas.height = 0;
+                if (blob && blob.type === "image/webp") {
+                  const objectUrl = URL.createObjectURL(blob);
+                  const temporary = new Image();
+                  temporary.decoding = "async";
+                  temporary.src = objectUrl;
+                  try {
+                    if (temporary.decode) await temporary.decode();
+                    else if (!await imageLoaded(temporary)) throw Error("Decode");
+                    img.src = objectUrl;
+                    photoBuffers.push(objectUrl);
+                    await imageLoaded(img);
+                    if (img.decode) await img.decode();
+                  } catch (_) { URL.revokeObjectURL(objectUrl); }
+                }
+              } else if (bitmap) bitmap.close();
+            }
+          } catch (err) {
+            // Canvas/WebP non supportati: lascia la fotografia originale.
+            console.warn("OLMI Hero: fallback immagine originale", err);
+          }
+          frame.classList.add("is-media-ready");
+        }
+        if (mobileGpuSafe) {
+          // Nessuna attesa bloccante per la pagina: le foto vengono preparate
+          // parallelamente mentre l'utente guarda il titolo iniziale.
+          void preparePhoto(left, ["./images/chef2.avif", "./images/cibo1.avif"]);
+          void preparePhoto(right, ["./images/cibo1.avif"]);
+        } else {
+          [left, right].forEach(frame => {
+            const img = frame.querySelector("img");
+            if (img && img.decode) void imageLoaded(img).then(ok => ok && img.decode().catch(() => {}));
+          });
+        }
         const FULL = 800,
           DEBOUNCE = 320,
           clamp = (v, a, b) => Math.min(Math.max(v, a), b),
@@ -3261,7 +3407,7 @@
               fade = p01 * (0.45 + w * 0.5);
             el.style.transform = `translate3d(${x.toFixed(3)}vw,${y.toFixed(3)}vh,0) rotate(${rot.toFixed(3)}deg) skewX(${skew.toFixed(2)}deg)`;
             el.style.opacity = (1 - fade).toFixed(3);
-            el.style.filter =
+            if (!mobileGpuSafe) el.style.filter =
               blur > 0.05 ? `blur(${blur.toFixed(2)}px)` : "none";
           });
           if (meta) meta.style.opacity = Math.max(0, 1 - p01 * 1.7);
@@ -3310,7 +3456,14 @@
           lastStep = performance.now() - DEBOUNCE;
           render();
         }
+        let lastMobilePaint = 0;
         function loop(now) {
+          // Campionamento temporale invariato, evita fotogrammi superflui sugli schermi a 120 Hz.
+          if (mobileGpuSafe && now - lastMobilePaint < 10) {
+            raf = requestAnimationFrame(loop);
+            return;
+          }
+          if (mobileGpuSafe) lastMobilePaint = now;
           let active = false;
           [a01, a12].forEach((a, i) => {
             if (!a.active) return;
